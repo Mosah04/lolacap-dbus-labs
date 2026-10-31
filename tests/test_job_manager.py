@@ -267,6 +267,70 @@ class TestJobManager(unittest.TestCase):
                 "third.mp4", "fon", False
             )
 
+    def test_list_jobs(self):
+        first_id = self.manager.create_job(
+            "first.mp4", "fon", False
+        )
+        second_id = self.manager.create_job(
+            "second.mp4", "yo", True
+        )
+
+        jobs = self.manager.list_jobs()
+
+        self.assertEqual(len(jobs), 2)
+
+        job_ids = {job["id"] for job in jobs}
+
+        self.assertEqual(job_ids, {first_id, second_id})
+    
+    def test_job_updates_are_notified(self):
+        events = []
+
+        manager = JobManager(
+            on_job_updated=lambda event: events.append(event)
+        )
+
+        try:
+            job_id = manager.create_job("video.mp4", "fon", False)
+
+            # Attendre que le traitement se termine.
+            manager.job_queue.join()
+
+            states = [event["state"] for event in events]
+
+            self.assertIn("running", states)
+            self.assertIn("done", states)
+
+            self.assertEqual(events[-1]["percentage"], 100)
+
+        finally:
+            manager.close()
+
+
+    def test_queued_cancellation_is_notified(self):
+        events = []
+        manager = JobManager(
+            on_job_updated=lambda event: events.append(event)
+        )
+
+        try:
+            job_id = manager.create_job("video.mp4", "fon", False)
+
+            # Ce test nécessite que le worker soit occupé par une autre tâche
+            # pour garantir que la tâche à annuler reste en attente.
+            manager.cancel_job(job_id)
+
+            cancelled_events = [
+                event for event in events
+                if event["id"] == job_id
+                and event["state"] == "cancelled"
+            ]
+
+            self.assertEqual(len(cancelled_events), 1)
+
+        finally:
+            manager.close()
+
 
 
 class BlockingBackend:

@@ -8,13 +8,15 @@ from server.backend.fake_backend import FakeBackend
 from server.database.job_repository import JobRepository
 
 from datetime import datetime, timezone
+from collections.abc import Callable
 
 
 class JobManager:
 
-    def __init__(self, backend=None, repository=None):
+    def __init__(self, backend=None, repository=None, on_job_updated: Callable[[dict], None] | None = None):
         self.backend = backend or FakeBackend()
         self.repository = repository
+        self.on_job_updated = on_job_updated
 
         self.jobs = {}
         self.cancel_events = {}
@@ -106,6 +108,8 @@ class JobManager:
 
             self._save_job(job)
 
+        self._notify_job_updated(job_id)
+
         try:
             output = self.backend.process(
                 job.source,
@@ -130,12 +134,16 @@ class JobManager:
 
                 self._save_job(job)
 
+            self._notify_job_updated(job_id)
+
         except InterruptedError:
             with self.lock:
                 job.status = "cancelled"
                 job.updated_at = datetime.now(timezone.utc)
 
                 self._save_job(job)
+
+            self._notify_job_updated(job_id)
 
         except Exception as error:
             with self.lock:
@@ -144,6 +152,28 @@ class JobManager:
                 job.updated_at = datetime.now(timezone.utc)
 
                 self._save_job(job)
+
+            self._notify_job_updated(job_id)
+
+    def _notify_job_updated(self, job_id):
+        if self.on_job_updated is None:
+            return
+
+        with self.lock:
+            job = self.jobs.get(job_id)
+
+            if job is None:
+                return
+
+            event = {
+                "id": job.id,
+                "state": job.status,
+                "percentage": job.progress,
+                "output": job.output_path,
+                "error": job.error
+            }
+
+        self.on_job_updated(event)
 
     def get_job(self, job_id: str) -> dict:
 
@@ -213,7 +243,10 @@ class JobManager:
             job.updated_at = datetime.now(timezone.utc)
             self._save_job(job)
 
+        self._notify_job_updated(job_id)
+
     def cancel_job(self, job_id: str) -> bool:
+        notify = False
 
         with self.lock:
             if job_id not in self.jobs:
@@ -221,18 +254,31 @@ class JobManager:
 
             job = self.jobs[job_id]
 
-            # A completed or already cancelled job cannot be cancelled again.
             if job.status in ("done", "failed", "cancelled", "interrupted"):
                 return False
 
-            # Signal the backend to stop if it is currently running.
             self.cancel_events[job_id].set()
 
-            # A queued job can be cancelled immediately.
             if job.status == "queued":
                 job.status = "cancelled"
                 job.updated_at = datetime.now(timezone.utc)
                 self._save_job(job)
+                notify = True
 
-            return True
+        if notify:
+            self._notify_job_updated(job_id)
 
+        return True
+
+    def list_jobs(self) -> list[dict]:
+        with self.lock:
+            return [
+                {
+                    "id": job.id,
+                    "state": job.status,
+                    "percentage": job.progress,
+                    "output": job.output_path,
+                    "error": job.error
+                }
+                for job in self.jobs.values()
+            ]
